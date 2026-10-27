@@ -1,181 +1,91 @@
-// The smallest thing that fails if the breaker's logic breaks: failures
-// inside the window open it, a good reply clears it, the window forgets old
-// failures, a rest ends by itself, a failed probe re-opens the model at once
-// with a longer rest up to max, and a streamed error counts like a whole one.
-import assert from "node:assert"
-import { onRequest, onResponse, onEvent, _reset } from "./retry.middleware.js"
+import { expect, test } from "bun:test"
+import * as mod from "./retry.middleware.js"
+import { check } from "./middleware.mjs"
 
-const opts = { failures: 2, window: 60, cooldown: 1, status: [500, 503] }
-const ctx = (options) => {
-  const c = { options, state: {}, status: 200, rejected: null, reject: (s, m) => (c.rejected = [s, m]) }
-  return c
+check(import.meta.dir, mod)
+
+// A rest grows on the clock, and the window slides on it, which cases.json
+// cannot wait for. These tests sleep the seconds they need — the rests and the
+// window are a second or two for them — and each uses models of its own, so
+// none of them reads or leaves anything the others are counting.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// ctxFor is a ctx shaped as the gateway's: one per request, reject recording.
+function ctxFor(options) {
+  const refused = []
+  const ctx = {
+    protocol: "anthropic", model: "", stream: false, path: "",
+    options, state: {}, reject: (status, message) => refused.push({ status, message }),
+  }
+  return { ctx, refused }
 }
-const ask = (model, status, context) => {
-  const c = context || ctx(opts)
-  c.status = status
-  onRequest({ model }, c)
-  // a refused request never has a reply: onRequest set the state, and the
-  // reply's status is the one this call means
-  if (!c.rejected) onResponse({ model }, c)
-  return c
+
+// asker is one round for one model: the request, then its reply. A refused
+// request has no reply, so none is given.
+function asker(model, ctx, refused) {
+  return async (status) => {
+    const before = refused.length
+    await mod.onRequest({ model }, ctx)
+    if (refused.length === before) await mod.onResponse({ model }, { ...ctx, status })
+  }
 }
-// what a request to model gets right now: null when it is let through, the
-// refusal when it is not
-const probe = (model, options) => {
-  const c = ctx(options || opts)
-  onRequest({ model }, c)
-  return c.rejected
+
+// back is the failed round and the round after it. The second request is the
+// one refused, and its message says how long the rest is now.
+async function back(ask, refused) {
+  await ask(500)
+  await ask(500)
+  return refused.at(-1)?.message
 }
-const ms = (n) => new Promise((r) => setTimeout(r, n))
 
-_reset()
+test("the probe after a rest that fails again rests twice as long", async () => {
+  mod._reset()
+  const { ctx, refused } = ctxFor({ failures: 1, cooldown: 1, max: 600 })
+  const ask = asker("cb-sleep-doubling", ctx, refused)
 
-// one failure of two: still open for use
-let c = ask("a", 500)
-onRequest({ model: "a" }, c)
-assert.equal(c.rejected, null, "one failure must not rest the model")
+  expect(await back(ask, refused)).toContain("1s left") // the cooldown
+  await sleep(1100)
+  expect(await back(ask, refused)).toContain("2s left") // the probe failed: twice as long
+})
 
-// the second inside the window rests it
-c = ask("a", 503)
-const blocked = ctx(opts)
-onRequest({ model: "a" }, blocked)
-assert.equal(blocked.rejected?.[0], 429, "second failure must rest the model")
-assert.match(blocked.rejected[1], /a is resting.*1s left/, "the refusal names the model and time left")
+test("the rest grows to max and no further, and a model that works again starts over", async () => {
+  mod._reset()
+  const { ctx, refused } = ctxFor({ failures: 1, cooldown: 1, max: 2 })
+  const ask = asker("cb-sleep-max", ctx, refused)
 
-// another model is untouched
-assert.equal(probe("b"), null, "a resting model must not block the others")
+  expect(await back(ask, refused)).toContain("1s left") // the cooldown
+  await sleep(1100)
+  expect(await back(ask, refused)).toContain("2s left") // twice as long
+  await sleep(2100)
+  expect(await back(ask, refused)).toContain("2s left") // max, not four times
 
-// a status not listed doesn't count
-_reset()
-ask("d", 404)
-ask("d", 404)
-assert.equal(probe("d"), null, "404 is not counted")
+  await sleep(2100)
+  await ask(200) // the probe works again, which gives the model its first rest back
+  await ask(500)
+  await ask(500)
+  expect(refused.at(-1)?.message).toContain("1s left") // a first rest, not a grown one
+}, 30000)
 
-// the window forgets: two failures far apart never open it
-_reset()
-const slow = { ...opts, window: 0.05 }
-ask("e", 500, ctx(slow))
-await ms(90)
-ask("e", 500, ctx(slow))
-assert.equal(probe("e", slow), null, "failures outside the window must be forgotten")
+test("a max under the cooldown cannot shorten a rest", async () => {
+  mod._reset()
+  const { ctx, refused } = ctxFor({ failures: 1, cooldown: 2, max: 1 })
+  const ask = asker("cb-sleep-tight", ctx, refused)
 
-// a good reply clears what the window had
-_reset()
-ask("f", 500)
-ask("f", 200)
-ask("f", 500)
-assert.equal(probe("f"), null, "a good reply clears the window")
+  expect(await back(ask, refused)).toContain("2s left")
+  await sleep(2100)
+  expect(await back(ask, refused)).toContain("2s left") // doubling to 1s would have shortened it
+}, 30000)
 
-// the rest ends by itself, and the request after it goes through
-_reset()
-ask("g", 500)
-ask("g", 500)
-assert.equal(probe("g")?.[0], 429, "resting")
-await ms(1100)
-assert.equal(probe("g"), null, "a rest ends after its cooldown")
+test("a failure older than the window does not count towards the rest", async () => {
+  mod._reset()
+  const { ctx, refused } = ctxFor({ failures: 2, window: 1, cooldown: 60 })
+  const ask = asker("cb-sleep-window", ctx, refused)
 
-// a failed probe re-opens at once, resting twice as long each time, up to max
-_reset()
-const grow = { ...opts, cooldown: 1, max: 2 }
-ask("h", 500, ctx(grow))
-ask("h", 500, ctx(grow))
-assert.match(probe("h", grow)?.[1], /1s left/, "the first rest is the cooldown")
-await ms(1100)
-assert.equal(probe("h", grow), null, "the probe after a rest is let through")
-ask("h", 500, ctx(grow))
-assert.match(probe("h", grow)?.[1], /2s left/, "a failed probe rests twice as long")
-await ms(2100)
-assert.equal(probe("h", grow), null, "let through again")
-ask("h", 500, ctx(grow))
-assert.match(probe("h", grow)?.[1], /2s left/, "the rest stops growing at max")
+  await ask(500)
+  await sleep(1100)
+  await ask(500)
+  await ask(500) // refused only if the first failure had counted
 
-// and a probe that works gives the model its first rest back
-await ms(2100)
-ask("h", 200, ctx(grow))
-ask("h", 500, ctx(grow))
-ask("h", 500, ctx(grow))
-assert.match(probe("h", grow)?.[1], /1s left/, "a model that works again starts over")
-
-// a streamed reply's error event counts like a whole one
-_reset()
-const streamed = ctx(opts)
-ask("k", 500, streamed)
-onEvent({ type: "error", error: { status: 500 } }, streamed)
-assert.equal(probe("k")?.[0], 429, "a stream error counts like a whole reply")
-
-// a streamed answer clears what the window had, as a whole reply does
-_reset()
-const healthy = ctx(opts)
-ask("m", 500, healthy)
-onEvent({ type: "content_block_delta", delta: { type: "text_delta", text: "hi" } }, healthy)
-ask("m", 500, healthy)
-assert.equal(probe("m"), null, "a streamed answer clears the window")
-
-// a stream that opens and dies at once is not a model that works again
-_reset()
-const flaky = ctx(grow)
-ask("n", 500, flaky)
-ask("n", 500, flaky)
-assert.equal(probe("n", grow)?.[0], 429, "resting")
-await ms(1100)
-assert.equal(probe("n", grow), null, "the probe is let through")
-onEvent({ type: "message_start", message: {} }, flaky)
-onEvent({ type: "error", error: {} }, flaky)
-assert.equal(probe("n", grow)?.[0], 429, "connecting is not answering: the stream still failed")
-
-// ...but content is, and it starts the model over
-await ms(2100)
-assert.equal(probe("n", grow), null, "let through again")
-onEvent({ type: "content_block_delta", delta: { type: "text_delta", text: "hi" } }, flaky)
-ask("n", 500, ctx(grow))
-assert.equal(probe("n", grow), null, "a streamed answer clears the count")
-
-// the shipped default, with no options set at all: the second failure rests it
-_reset()
-ask("p", 500, ctx({}))
-assert.equal(probe("p", {}), null, "one failure is not enough under the default")
-ask("p", 500, ctx({}))
-assert.equal(probe("p", {})?.[0], 429, "the shipped default threshold is 2")
-
-// `message` replaces the refusal's text, and nothing else
-_reset()
-const told = { ...opts, message: "the volt is out; pick another" }
-ask("q", 500, ctx(told))
-ask("q", 500, ctx(told))
-assert.equal(probe("q", told)?.[1], "the volt is out; pick another", "the message option is the refusal's whole text")
-
-// a reply that names its model only in body.response.model is still counted:
-// onResponse falls back to it when the request left nothing on the state
-_reset()
-const named = { state: {}, status: 500, rejected: null, reject: () => {} }
-onResponse({ response: { model: "r" } }, named)
-onResponse({ response: { model: "r" } }, named)
-assert.equal(probe("r")?.[0], 429, "body.response.model names the model when the state has none")
-
-// opts() keeps only what it can use: the rest is the default
-_reset()
-const junk = { failures: 0, window: -5, cooldown: "soon", max: null, status: "500", message: 7 }
-ask("s", 500, ctx(junk))
-assert.equal(probe("s", junk), null, "failures 0 falls back to the default 2")
-ask("s", 500, ctx(junk))
-assert.equal(probe("s", junk)?.[0], 429, "…so two failures still rest it")
-assert.match(probe("s", junk)[1], /is resting/, "a message that is not a string is ignored")
-
-// status that is not a non-empty array is ignored, so the default list stands
-_reset()
-ask("t", 500, ctx({ ...opts, status: [] }))
-ask("t", 500, ctx({ ...opts, status: [] }))
-assert.equal(probe("t", { ...opts, status: [] })?.[0], 429, "status [] leaves the default list in place")
-
-// a max below the cooldown is raised to it: a rest must never shrink
-_reset()
-const tight = { ...opts, cooldown: 2, max: 1 }
-ask("u", 500, ctx(tight))
-ask("u", 500, ctx(tight))
-assert.match(probe("u", tight)?.[1], /2s left/, "the first rest is the cooldown")
-await ms(2100)
-assert.equal(probe("u", tight), null, "the probe after a rest is let through")
-ask("u", 500, ctx(tight))
-assert.match(probe("u", tight)?.[1], /2s left/, "max under the cooldown cannot shorten the second rest")
-
-console.log("retry.middleware: all checks passed")
+  expect(refused).toEqual([])
+})

@@ -96,5 +96,19 @@ counts there are always zero. The gateway's process is the one that counts.
 ## Test
 
 ```sh
-bun retry.test.mjs   # or: node retry.test.mjs
+bun test
 ```
+
+`cases.json` is the suite's source of truth and is shared: it is the copy the
+community package runs
+([magpie-community/plugins `packages/retry`](https://github.com/magpie-community/plugins/pull/431)),
+as is `middleware.mjs`, which calls the hooks the way magpie's gateway does.
+`retry.test.mjs` adds what needs the clock — a rest that doubles up to `max`,
+a rest that cannot shrink, a failure sliding out of the window — and differs
+from the community copy by one line, its import.
+
+To pull the published copies in, copy these two files from
+`packages/retry/` and `scripts/` of the community repo:
+
+- `cases.json` → `./cases.json`
+- `scripts/middleware.mjs` → `./middleware.mjs`
