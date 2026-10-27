@@ -6,8 +6,8 @@ keeps failing rests for a while: requests to it are refused at once with a
 a connection timeout every turn.
 
 ```sh
-magpie plugin add /Users/xiaozhou/magpie-plugins/middleware-retry
-magpie plugin options retry '{"failures": 2, "cooldown": 120}'
+magpie plugin add github:zhou0928/magpie-retry
+magpie plugin options magpie-retry '{"failures": 1}'
 ```
 
 ## Options
@@ -75,8 +75,10 @@ that state in Go and are not sharded.
 ## Install
 
 ```sh
-magpie plugin add /Users/xiaozhou/magpie-plugins/middleware-retry
+magpie plugin add github:zhou0928/magpie-retry
 ```
+
+A local checkout works too: `magpie plugin add ./magpie-retry`.
 
 No restart is needed: a change to `plugins.json` or to a middleware's file is
 picked up by the next request, at most a second later. Settings → Plugins shows
