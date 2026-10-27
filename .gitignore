@@ -2,3 +2,6 @@
 node_modules/
 bun.lock
 bun.lockb
+
+# probe/ 是本地调试用的实验品（探针中间件），不进仓库
+probe/

@@ -1,4 +1,4 @@
-# @magpie-community/middleware-retry
+# magpie-retry
 
 A circuit breaker for [magpie](https://usemagpie.ai)'s gateway. A model that
 keeps failing rests for a while: requests to it are refused at once with a
