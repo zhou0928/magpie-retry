@@ -1,0 +1,14 @@
+{
+  "name": "@magpie-community/middleware-retry",
+  "version": "0.0.2",
+  "description": "A circuit breaker for magpie's gateway: a model that keeps failing rests for a while, refused at once with a 429 so the agent retries on its own backoff instead of waiting out a connection timeout",
+  "type": "module",
+  "files": ["retry.middleware.js", "README.md"],
+  "scripts": { "test": "node retry.test.mjs" },
+  "keywords": ["magpie", "magpie-middleware", "new-api", "circuit-breaker", "retry", "resilience", "llm-gateway"],
+  "license": "MIT",
+  "magpie": {
+    "middleware": "./retry.middleware.js",
+    "options": { "failures": 2, "window": 60, "cooldown": 120, "max": 600, "status": [429, 500, 502, 503, 504] }
+  }
+}

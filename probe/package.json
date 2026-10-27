@@ -1,0 +1,11 @@
+{
+  "name": "magpie-probe",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Temporary probe: logs what magpie hands onProvider and onRequest, to learn the real contract",
+  "type": "module",
+  "files": ["probe.middleware.js"],
+  "magpie": {
+    "middleware": "./probe.middleware.js"
+  }
+}
